@@ -50,6 +50,9 @@ class Publish extends Control {
             // whatever this pipeline publishes to, and it lives here because this is
             // where it is decided.
             'endUrl'      => (string) ($def['publish']['url'] ?? ''),
+            // A hosting target's domain IS its end URL, but the driver needs it as a bare
+            // hostname, so it is stored as one and shown in the same field.
+            'domain'      => (string) ($def['publish']['domain'] ?? ''),
             'cron'        => (string) ($def['trigger']['cron'] ?? ''),
             'workingUrl'  => rtrim((string) ($cfg['app']['baseurl'] ?? ''), '/'),
             'canTrigger'  => (string) ($cfg['pipeline']['trigger_secret'] ?? '') !== '',
@@ -64,7 +67,18 @@ class Publish extends Control {
         $driver = (string) $this->getParam('driver', 'tiknix-hosted');
         $url    = trim((string) $this->getParam('url', ''));
         $cron   = trim((string) $this->getParam('cron', ''));
-        if (!\app\Publish\PublishRegistry::driver($driver)) { Flight::jsonError('Unknown publish driver.', 400); return; }
+        $d = \app\Publish\PublishRegistry::driver($driver);
+        if (!$d) { Flight::jsonError('Unknown publish driver.', 400); return; }
+
+        // A hosting target binds a hostname: the field holds a bare domain, not a URL, and
+        // the driver + capricorn + the certificate all key off it. Validate it HERE rather
+        // than trusting the far end — this value ends up in a proxy file and a cert request.
+        $domain = '';
+        if (!empty($d::capabilities()['domain'])) {
+            $domain = strtolower(trim($url));
+            if ($domain !== '' && !$this->validHost($domain)) { Flight::jsonError('That is not a valid domain name.', 400); return; }
+            $url = $domain !== '' ? 'https://' . $domain : '';
+        }
 
         $dir    = $this->instanceDir($inst);
         $loader = new Loader($dir);
@@ -72,8 +86,9 @@ class Publish extends Control {
 
         $def['slug']    = self::PIPELINE;
         $def['name']    = 'Publish';
-        $def['steps']   = $this->steps($def['steps'] ?? [], $driver);
+        $def['steps']   = $this->steps($def['steps'] ?? [], $driver, $domain);
         $def['publish'] = ['driver' => $driver, 'url' => $url];
+        if ($domain !== '') $def['publish']['domain'] = $domain;
         if ($cron !== '') $def['trigger'] = ['cron' => $cron];
         else unset($def['trigger']);
 
@@ -134,11 +149,18 @@ class Publish extends Control {
      * core's /publish/run, and core resolves the instance from that key. See
      * lib/Pipeline/Steps/PublishStep.php.
      */
-    private function steps(array $steps, string $driver): array {
+    private function steps(array $steps, string $driver, string $domain = ''): array {
+        $config = ['target' => $driver, 'op' => 'deploy'];
+        if ($domain !== '') $config['config'] = ['domain' => $domain];
+        // Standing a container up runs a chain of hypervisor tasks and can pass a minute;
+        // the step default (120s) would report a timeout while the deploy was still
+        // succeeding, which is the worst possible answer.
+        if ($driver === 'tiknix-hosted') $config['timeout'] = 600;
+
         $generated = [
             'name'       => 'publish',
             'type'       => 'publish',
-            'config'     => ['target' => $driver, 'op' => 'deploy'],
+            'config'     => $config,
             'on_success' => 'next',
             'on_fail'    => 'exit',
         ];
@@ -170,6 +192,16 @@ class Publish extends Control {
             return [$s, null];
         }
         return [$s, $inst];
+    }
+
+    /** Strict host allowlist, mirroring capricorn's valid_host: DNS chars, no traversal. */
+    private function validHost(string $h): bool {
+        $h = strtolower(trim($h));
+        if ($h === '' || strlen($h) > 253) return false;
+        if (strpos($h, '..') !== false) return false;
+        if (!preg_match('/^[a-z0-9.-]+$/', $h)) return false;
+        if (in_array($h[0], ['.', '-'], true) || in_array(substr($h, -1), ['.', '-'], true)) return false;
+        return strpos($h, '.') !== false;
     }
 
     /** Instance dir built ONLY from the resolved row's slug/app, never client input. */

@@ -81,10 +81,10 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
           <div class="form-text" id="pub-blurb"></div>
         </div>
         <div class="col-md-4">
-          <label class="form-label small fw-semibold">End URL</label>
+          <label class="form-label small fw-semibold" id="pub-url-label">End URL</label>
           <input id="pub-url" class="form-control form-control-sm" placeholder="https://example.com"
-                 value="<?= $h($endUrl) ?>" autocomplete="off" spellcheck="false">
-          <div class="form-text">Where this publishes to.</div>
+                 value="<?= $h($domain !== '' ? $domain : $endUrl) ?>" autocomplete="off" spellcheck="false">
+          <div class="form-text" id="pub-url-help">Where this publishes to.</div>
         </div>
         <div class="col-md-3">
           <label class="form-label small fw-semibold">When</label>
@@ -116,16 +116,28 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
   const csrf = <?= json_encode($csrf) ?>;
   const msg = document.getElementById('pub-msg');
 
-  // Targets differ enough that the wrong blurb is worse than none: "we handle the proxy
-  // and the certificate" is actively misleading next to a pull request. Keep it in step
-  // with the selection, and hide the End URL for targets that don't have one.
+  // Targets differ enough that the wrong label is worse than none: "we handle the proxy
+  // and the certificate" is actively misleading next to a pull request, and a hosting
+  // target needs a bare hostname where a generic one takes a URL. One field, told what
+  // it means by the selected target.
   const drivers = <?= json_encode(array_column($drivers, null, 'key')) ?>;
   const driverSel = document.getElementById('pub-driver');
+  const urlIn = document.getElementById('pub-url');
   function describe() {
-    const d = drivers[driverSel.value] || {};
+    const d = drivers[driverSel.value] || {}, cap = d.capabilities || {};
     document.getElementById('pub-blurb').textContent = d.blurb || '';
-    const hosts = d.capabilities && !d.capabilities.code;
-    document.getElementById('pub-url').closest('.col-md-4').hidden = !hosts;
+    // A repository target's URL is the pull request's — discovered, never typed.
+    urlIn.closest('.col-md-4').hidden = !!cap.code;
+    if (cap.domain) {
+      document.getElementById('pub-url-label').textContent = 'Domain';
+      urlIn.placeholder = 'app.example.com';
+      document.getElementById('pub-url-help').textContent =
+        'Point a CNAME at this control plane first — the certificate is issued for this domain.';
+    } else {
+      document.getElementById('pub-url-label').textContent = 'End URL';
+      urlIn.placeholder = 'https://example.com';
+      document.getElementById('pub-url-help').textContent = 'Where this publishes to.';
+    }
   }
   driverSel.addEventListener('change', describe);
   describe();
