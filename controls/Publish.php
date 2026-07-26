@@ -70,22 +70,9 @@ class Publish extends Control {
         $loader = new Loader($dir);
         $def    = $loader->get(self::PIPELINE) ?: [];
 
-        // Keep whatever steps the project has authored — this owns the target, not the
-        // recipe. A first save seeds a minimal, honest one-step pipeline the operator
-        // can then edit in the Pipeline Editor.
         $def['slug']    = self::PIPELINE;
         $def['name']    = 'Publish';
-        // A minimal, HONEST first step: it announces the target rather than pretending to
-        // deploy. The operator edits the real recipe in the Pipeline Editor — this file is
-        // the project's, and overwriting authored steps would be the sidecar taking
-        // ownership of something it does not own.
-        $def['steps']   = $def['steps'] ?? [[
-            'name'       => 'announce',
-            'type'       => 'shell',
-            'config'     => ['command' => 'echo ' . escapeshellarg('publishing via ' . $driver)],
-            'on_success' => 'next',
-            'on_fail'    => 'exit',
-        ]];
+        $def['steps']   = $this->steps($def['steps'] ?? [], $driver);
         $def['publish'] = ['driver' => $driver, 'url' => $url];
         if ($cron !== '') $def['trigger'] = ['cron' => $cron];
         else unset($def['trigger']);
@@ -132,6 +119,34 @@ class Publish extends Control {
             return;
         }
         Flight::jsonSuccess(['run_id' => (int) $d['run_id']], 'Publishing…');
+    }
+
+    /**
+     * The pipeline's steps for a target — WITHOUT taking ownership of the recipe.
+     *
+     * The file is the project's. So this only writes the single `publish` step it
+     * generated itself: on a first save, or when that generated step is still the whole
+     * pipeline and the operator has picked a different target. The moment anyone edits
+     * the recipe in the Pipeline Editor — adds a build step, a test, a notification —
+     * their steps are returned untouched and only the target metadata below changes.
+     *
+     * The step itself carries no credential: it presents the instance's broker key to
+     * core's /publish/run, and core resolves the instance from that key. See
+     * lib/Pipeline/Steps/PublishStep.php.
+     */
+    private function steps(array $steps, string $driver): array {
+        $generated = [
+            'name'       => 'publish',
+            'type'       => 'publish',
+            'config'     => ['target' => $driver, 'op' => 'deploy'],
+            'on_success' => 'next',
+            'on_fail'    => 'exit',
+        ];
+        if (!$steps) return [$generated];
+        $onlyOurs = count($steps) === 1
+            && ($steps[0]['type'] ?? '') === 'publish'
+            && ($steps[0]['name'] ?? '') === 'publish';
+        return $onlyOurs ? [$generated] : $steps;
     }
 
     // ---- guards ------------------------------------------------------------

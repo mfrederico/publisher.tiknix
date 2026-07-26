@@ -78,7 +78,7 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
               </option>
             <?php endforeach; ?>
           </select>
-          <div class="form-text"><?= $h($drivers[0]['blurb'] ?? '') ?></div>
+          <div class="form-text" id="pub-blurb"></div>
         </div>
         <div class="col-md-4">
           <label class="form-label small fw-semibold">End URL</label>
@@ -115,6 +115,21 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
 (function () {
   const csrf = <?= json_encode($csrf) ?>;
   const msg = document.getElementById('pub-msg');
+
+  // Targets differ enough that the wrong blurb is worse than none: "we handle the proxy
+  // and the certificate" is actively misleading next to a pull request. Keep it in step
+  // with the selection, and hide the End URL for targets that don't have one.
+  const drivers = <?= json_encode(array_column($drivers, null, 'key')) ?>;
+  const driverSel = document.getElementById('pub-driver');
+  function describe() {
+    const d = drivers[driverSel.value] || {};
+    document.getElementById('pub-blurb').textContent = d.blurb || '';
+    const hosts = d.capabilities && !d.capabilities.code;
+    document.getElementById('pub-url').closest('.col-md-4').hidden = !hosts;
+  }
+  driverSel.addEventListener('change', describe);
+  describe();
+
   const say = (t, c) => { msg.className = 'form-text ms-1 ' + (c || 'text-body-secondary'); msg.textContent = t; };
   const post = (url, data) => fetch(url, {
     method: 'POST',
