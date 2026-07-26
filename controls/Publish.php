@@ -36,9 +36,10 @@ class Publish extends Control {
         [$s, $inst] = $this->guard();
         if (!$inst) return;
 
-        $dir  = $this->instanceDir($inst);
-        $def  = (new Loader($dir))->get(self::PIPELINE);
-        $cfg  = @parse_ini_file($dir . '/conf/config.ini', true) ?: [];
+        $dir      = $this->instanceDir($inst);
+        $def      = (new Loader($dir))->get(self::PIPELINE);
+        $cfg      = @parse_ini_file($dir . '/conf/config.ini', true) ?: [];
+        $bindings = $this->bindings((int) $inst['id']);
 
         $this->render('publish/index', [
             'project'     => $inst,
@@ -56,7 +57,68 @@ class Publish extends Control {
             'cron'        => (string) ($def['trigger']['cron'] ?? ''),
             'workingUrl'  => rtrim((string) ($cfg['app']['baseurl'] ?? ''), '/'),
             'canTrigger'  => (string) ($cfg['pipeline']['trigger_secret'] ?? '') !== '',
+            'bindings'    => $bindings,
+            'selected'    => $this->selectedDriver($def, $bindings),
         ], false);
+    }
+
+    /**
+     * Which target the page opens on.
+     *
+     * A saved pipeline always wins — it is the project's decision. With none, prefer a
+     * target that is actually BOUND to something, so connecting a repo and coming here
+     * lands on that repo rather than on a hosting target the project has never used.
+     *
+     * Deliberately NOT the same as creating the pipeline: connecting a repo says where
+     * code MAY go, not that every change should be published there, and writing a file
+     * into someone's repo as a side effect of connecting is not ours to do. This just
+     * means one Save away instead of a dropdown hunt.
+     */
+    private function selectedDriver(?array $def, array $bindings): string {
+        $saved = (string) ($def['publish']['driver'] ?? '');
+        if ($saved !== '') return $saved;
+        foreach ($bindings as $key => $b) if (!empty($b['ok'])) return $key;
+        return 'tiknix-hosted';
+    }
+
+    /**
+     * What each target is actually bound to, keyed by driver — "GitHub Pull Request" on
+     * its own says nothing about WHICH repo, and a page that decides where a project
+     * publishes has to show that or the operator is choosing blind.
+     *
+     * Read straight from core's directory over PDO. The driver's own status() would be
+     * the obvious source, but running it here would resolve its beans against THIS
+     * sidecar's database — the drivers are core's, and they only ever run on core.
+     *
+     * @return array<string,array{label:string,detail:string,ok:bool}>
+     */
+    private function bindings(int $instanceId): array {
+        $out  = [];
+        $core = Kernel::coreDb();
+        if (!$core) return $out;
+
+        $st = $core->prepare('SELECT metadata_json, last_used_at, last_error FROM connections
+             WHERE instance_id = ? AND connector_type = ? AND enabled = 1 LIMIT 1');
+        if ($st && $st->execute([$instanceId, 'github'])) {
+            $row  = $st->fetch(\PDO::FETCH_ASSOC) ?: null;
+            $meta = $row ? (json_decode((string) $row['metadata_json'], true) ?: []) : [];
+            $repo = trim((string) ($meta['owner'] ?? '') . '/' . (string) ($meta['repo'] ?? ''), '/');
+            $out['github-pr'] = $repo !== ''
+                ? ['label' => $repo, 'ok' => true,
+                   'detail' => 'opens a pull request into ' . (string) ($meta['defaultBranch'] ?? 'main')
+                             . ((string) ($row['last_used_at'] ?? '') !== '' ? ' · last published ' . $row['last_used_at'] : '')]
+                : ['label' => 'No repository connected', 'ok' => false,
+                   'detail' => 'Connect one on the Connections page, then publish.'];
+        }
+
+        $st = $core->prepare('SELECT ct_vmid FROM instance WHERE id = ?');
+        if ($st && $st->execute([$instanceId])) {
+            $vmid = (int) ($st->fetchColumn() ?: 0);
+            $out['tiknix-hosted'] = $vmid > 0
+                ? ['label' => 'Container ' . $vmid, 'ok' => true, 'detail' => 'already running — publishing re-applies settings']
+                : ['label' => 'Not deployed yet', 'ok' => false, 'detail' => 'publishing stands the container up'];
+        }
+        return $out;
     }
 
     /** POST /publish/save — write the publish pipeline into the project's repo. */

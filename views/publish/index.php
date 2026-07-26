@@ -3,7 +3,7 @@
  * Publisher — the one place a project's publish target is decided.
  *
  * Vars: $project, $projectsUrl, $coreUrl, $def, $drivers, $endUrl, $domain, $cron,
- *       $workingUrl, $canTrigger
+ *       $workingUrl, $canTrigger, $bindings, $selected
  */
 $h = fn($s) => htmlspecialchars((string) $s);
 $csrf = \app\SimpleCsrf::getTokenArray();
@@ -51,9 +51,17 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
     <div class="col-md-6">
       <div class="card h-100 shadow-sm"><div class="card-body">
         <div class="text-uppercase text-body-secondary small fw-semibold" style="letter-spacing:.06em">Published to</div>
+        <?php
+        /* A repository target has no end URL — its result is a branch and a pull request,
+           not a site. Saying "not published yet" there contradicted the target's own
+           "last published" line, so fall back to what the target is bound to. */
+        $__b = $bindings[$selected] ?? null;
+        ?>
         <div class="mt-1">
           <?php if ($endUrl !== ''): ?>
             <a href="<?= $h($endUrl) ?>" target="_blank" rel="noopener"><?= $h(parse_url($endUrl, PHP_URL_HOST) ?: $endUrl) ?></a>
+          <?php elseif ($__b && !empty($__b['ok'])): ?>
+            <span class="fw-semibold"><?= $h($__b['label']) ?></span>
           <?php else: ?>
             <span class="text-body-secondary">not published yet</span>
           <?php endif; ?>
@@ -73,12 +81,13 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
         <div class="col-md-5">
           <label class="form-label small fw-semibold">How</label>
           <select id="pub-driver" class="form-select form-select-sm">
-            <?php foreach ($drivers as $d): $sel = ($def['publish']['driver'] ?? 'tiknix-hosted') === $d['key']; ?>
+            <?php foreach ($drivers as $d): $sel = $selected === $d['key']; ?>
               <option value="<?= $h($d['key']) ?>" <?= $sel ? 'selected' : '' ?> <?= empty($d['available']) ? 'disabled' : '' ?>>
                 <?= $h($d['label']) ?><?= empty($d['available']) ? ' — unavailable' : '' ?>
               </option>
             <?php endforeach; ?>
           </select>
+          <div class="mt-2 small" id="pub-binding"></div>
           <div class="form-text" id="pub-blurb"></div>
         </div>
         <div class="col-md-4">
@@ -122,11 +131,21 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
   // target needs a bare hostname where a generic one takes a URL. One field, told what
   // it means by the selected target.
   const drivers = <?= json_encode(array_column($drivers, null, 'key')) ?>;
+  const bindings = <?= json_encode($bindings) ?>;
   const driverSel = document.getElementById('pub-driver');
   const urlIn = document.getElementById('pub-url');
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   function describe() {
     const d = drivers[driverSel.value] || {}, cap = d.capabilities || {};
     document.getElementById('pub-blurb').textContent = d.blurb || '';
+    // WHICH repo / WHICH container. Picking a target without seeing what it points at
+    // is choosing blind, which is how you publish to the wrong place.
+    const b = bindings[driverSel.value];
+    document.getElementById('pub-binding').innerHTML = !b ? '' :
+      '<span class="badge ' + (b.ok ? 'text-bg-success' : 'text-bg-secondary') + '">'
+      + '<i class="bi bi-' + (b.ok ? 'check-circle' : 'dash-circle') + ' me-1"></i>' + esc(b.label) + '</span>'
+      + '<span class="text-body-secondary ms-2">' + esc(b.detail) + '</span>';
     // A repository target's URL is the pull request's — discovered, never typed.
     urlIn.closest('.col-md-4').hidden = !!cap.code;
     if (cap.domain) {
