@@ -2,7 +2,8 @@
 /**
  * Publisher — the one place a project's publish target is decided.
  *
- * Vars: $project, $projectsUrl, $coreUrl, $def, $drivers, $endUrl, $cron, $workingUrl, $canTrigger
+ * Vars: $project, $projectsUrl, $coreUrl, $def, $drivers, $endUrl, $domain, $cron,
+ *       $workingUrl, $canTrigger
  */
 $h = fn($s) => htmlspecialchars((string) $s);
 $csrf = \app\SimpleCsrf::getTokenArray();
