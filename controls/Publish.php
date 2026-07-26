@@ -46,39 +46,70 @@ class Publish extends Control {
             'projectsUrl' => Sso::projectPickerUrl(),
             'coreUrl'     => rtrim((string) Flight::get('sidecar.core_url'), '/'),
             'def'         => $def,
+            // Two INDEPENDENT questions, so two lists. A project can open a pull request
+            // on its repo AND run in a container; those are not alternatives.
+            'repoDrivers' => \app\Publish\PublishRegistry::repository(),
+            'hostDrivers' => \app\Publish\PublishRegistry::hosting(),
             'drivers'     => \app\Publish\PublishRegistry::all(),
-            // The end URL is a property of the TARGET, not of the project — it is
-            // whatever this pipeline publishes to, and it lives here because this is
-            // where it is decided.
-            'endUrl'      => (string) ($def['publish']['url'] ?? ''),
             // A hosting target's domain IS its end URL, but the driver needs it as a bare
-            // hostname, so it is stored as one and shown in the same field.
+            // hostname, so it is stored as one and shown as one.
             'domain'      => (string) ($def['publish']['domain'] ?? ''),
             'cron'        => (string) ($def['trigger']['cron'] ?? ''),
             'workingUrl'  => rtrim((string) ($cfg['app']['baseurl'] ?? ''), '/'),
             'canTrigger'  => (string) ($cfg['pipeline']['trigger_secret'] ?? '') !== '',
             'bindings'    => $bindings,
-            'selected'    => $this->selectedDriver($def, $bindings),
+            'chosen'      => $this->chosen($def, $bindings),
         ], false);
     }
 
     /**
-     * Which target the page opens on.
+     * The target selected in each group, as [group => driver key|''].
      *
-     * A saved pipeline always wins — it is the project's decision. With none, prefer a
+     * A saved pipeline always wins — it is the project's decision. With none, preselect a
      * target that is actually BOUND to something, so connecting a repo and coming here
-     * lands on that repo rather than on a hosting target the project has never used.
+     * lands on that repo instead of on a hosting target the project has never used.
      *
      * Deliberately NOT the same as creating the pipeline: connecting a repo says where
      * code MAY go, not that every change should be published there, and writing a file
-     * into someone's repo as a side effect of connecting is not ours to do. This just
+     * into someone's repo as a side effect of connecting is not ours to do. This only
      * means one Save away instead of a dropdown hunt.
+     *
+     * @return array{repo:string,host:string}
      */
-    private function selectedDriver(?array $def, array $bindings): string {
-        $saved = (string) ($def['publish']['driver'] ?? '');
-        if ($saved !== '') return $saved;
-        foreach ($bindings as $key => $b) if (!empty($b['ok'])) return $key;
-        return 'tiknix-hosted';
+    private function chosen(?array $def, array $bindings): array {
+        $saved = $this->savedTargets($def);
+        $pick = function (array $group) use ($saved, $bindings): string {
+            $keys = array_column($group, 'key');
+            foreach ($saved as $k) if (in_array($k, $keys, true)) return $k;   // the project's choice
+            if ($saved) return '';                                             // it chose NOT to use this group
+            foreach ($keys as $k) if (!empty($bindings[$k]['ok'])) return $k;  // else: whatever is bound
+            return '';
+        };
+        return [
+            'repo' => $pick(\app\Publish\PublishRegistry::repository()),
+            'host' => $pick(\app\Publish\PublishRegistry::hosting()),
+        ];
+    }
+
+    /**
+     * Targets the saved pipeline publishes to, in order.
+     *
+     * Reads the STEPS, not the metadata: the steps are what actually runs, and someone
+     * editing the pipeline directly must not find this page disagreeing with their file.
+     * Falls back to the legacy single `publish.driver` written before targets could be
+     * combined.
+     *
+     * @return string[]
+     */
+    private function savedTargets(?array $def): array {
+        $out = [];
+        foreach ((array) ($def['steps'] ?? []) as $step) {
+            if (($step['type'] ?? '') !== 'publish') continue;
+            $t = (string) ($step['config']['target'] ?? '');
+            if ($t !== '' && !in_array($t, $out, true)) $out[] = $t;
+        }
+        if (!$out && ($def['publish']['driver'] ?? '') !== '') $out[] = (string) $def['publish']['driver'];
+        return $out;
     }
 
     /**
@@ -126,31 +157,37 @@ class Publish extends Control {
         [$s, $inst] = $this->guard(true);
         if (!$inst) return;
 
-        $driver = (string) $this->getParam('driver', 'tiknix-hosted');
-        $url    = trim((string) $this->getParam('url', ''));
-        $cron   = trim((string) $this->getParam('cron', ''));
-        $d = \app\Publish\PublishRegistry::driver($driver);
-        if (!$d) { Flight::jsonError('Unknown publish driver.', 400); return; }
+        // Ship the code first, then bring the runtime in line with it — the order a person
+        // would do it by hand. Either may be blank: publishing to a repo without hosting,
+        // or hosting without a repo, are both perfectly ordinary.
+        $targets = [];
+        foreach (['repo', 'host'] as $group) {
+            $key = trim((string) $this->getParam($group, ''));
+            if ($key === '') continue;
+            if (!\app\Publish\PublishRegistry::driver($key)) { Flight::jsonError('Unknown publish target: ' . $key, 400); return; }
+            $targets[] = $key;
+        }
+        if (!$targets) { Flight::jsonError('Choose at least one target — a repository, a place to run, or both.', 400); return; }
 
         // A hosting target binds a hostname: the field holds a bare domain, not a URL, and
         // the driver + capricorn + the certificate all key off it. Validate it HERE rather
         // than trusting the far end — this value ends up in a proxy file and a cert request.
-        $domain = '';
-        if (!empty($d::capabilities()['domain'])) {
-            $domain = strtolower(trim($url));
-            if ($domain !== '' && !$this->validHost($domain)) { Flight::jsonError('That is not a valid domain name.', 400); return; }
-            $url = $domain !== '' ? 'https://' . $domain : '';
-        }
+        $domain = strtolower(trim((string) $this->getParam('domain', '')));
+        if ($domain !== '' && !$this->validHost($domain)) { Flight::jsonError('That is not a valid domain name.', 400); return; }
 
+        $cron   = trim((string) $this->getParam('cron', ''));
         $dir    = $this->instanceDir($inst);
         $loader = new Loader($dir);
         $def    = $loader->get(self::PIPELINE) ?: [];
 
         $def['slug']    = self::PIPELINE;
         $def['name']    = 'Publish';
-        $def['steps']   = $this->steps($def['steps'] ?? [], $driver, $domain);
-        $def['publish'] = ['driver' => $driver, 'url' => $url];
-        if ($domain !== '') $def['publish']['domain'] = $domain;
+        $def['steps']   = $this->steps($def['steps'] ?? [], $targets, $domain);
+        $def['publish'] = ['targets' => $targets];
+        if ($domain !== '') {
+            $def['publish']['domain'] = $domain;
+            $def['publish']['url']    = 'https://' . $domain;
+        }
         if ($cron !== '') $def['trigger'] = ['cron' => $cron];
         else unset($def['trigger']);
 
@@ -199,38 +236,52 @@ class Publish extends Control {
     }
 
     /**
-     * The pipeline's steps for a target — WITHOUT taking ownership of the recipe.
+     * The pipeline's steps for the chosen targets — WITHOUT taking ownership of the recipe.
      *
-     * The file is the project's. So this only writes the single `publish` step it
-     * generated itself: on a first save, or when that generated step is still the whole
-     * pipeline and the operator has picked a different target. The moment anyone edits
-     * the recipe in the Pipeline Editor — adds a build step, a test, a notification —
-     * their steps are returned untouched and only the target metadata below changes.
+     * One `publish` step per target, in order, because a publish genuinely can be several
+     * things: open the pull request, then bring the container in line. The pipeline
+     * runtime has always been a sequence; only this page used to force a choice.
      *
-     * The step itself carries no credential: it presents the instance's broker key to
-     * core's /publish/run, and core resolves the instance from that key. See
+     * The file is the project's, so this rewrites ONLY steps it generated itself — a
+     * pipeline consisting entirely of `publish` steps. The moment anyone edits the recipe
+     * in the Pipeline Editor (a build, a test, a notification), their steps come back
+     * untouched and just the target metadata changes.
+     *
+     * The steps carry no credential: each presents the instance's broker key to core's
+     * /publish/run, and core resolves the instance from that key alone. See
      * lib/Pipeline/Steps/PublishStep.php.
+     *
+     * @param string[] $targets
      */
-    private function steps(array $steps, string $driver, string $domain = ''): array {
-        $config = ['target' => $driver, 'op' => 'deploy'];
-        if ($domain !== '') $config['config'] = ['domain' => $domain];
-        // Standing a container up runs a chain of hypervisor tasks and can pass a minute;
-        // the step default (120s) would report a timeout while the deploy was still
-        // succeeding, which is the worst possible answer.
-        if ($driver === 'tiknix-hosted') $config['timeout'] = 600;
+    private function steps(array $steps, array $targets, string $domain = ''): array {
+        $generated = [];
+        foreach ($targets as $t) {
+            $driver = \app\Publish\PublishRegistry::driver($t);
+            $config = ['target' => $t, 'op' => 'deploy'];
+            // The domain belongs to whichever target actually binds one.
+            if ($domain !== '' && $driver && !empty($driver::capabilities()['domain'])) {
+                $config['config'] = ['domain' => $domain];
+            }
+            // Standing a container up runs a chain of hypervisor tasks and can pass a
+            // minute; the step default (120s) would report a timeout while the deploy was
+            // still succeeding, which is the worst possible answer.
+            if ($t === 'tiknix-hosted') $config['timeout'] = 600;
 
-        $generated = [
-            'name'       => 'publish',
-            'type'       => 'publish',
-            'config'     => $config,
-            'on_success' => 'next',
-            'on_fail'    => 'exit',
-        ];
-        if (!$steps) return [$generated];
-        $onlyOurs = count($steps) === 1
-            && ($steps[0]['type'] ?? '') === 'publish'
-            && ($steps[0]['name'] ?? '') === 'publish';
-        return $onlyOurs ? [$generated] : $steps;
+            $generated[] = [
+                // Step names are variable references ({step.output}), so the loader holds
+                // them to [a-z0-9_] — a driver key's hyphens are not allowed here.
+                'name'       => 'publish_' . str_replace('-', '_', $t),
+                'type'       => 'publish',
+                'config'     => $config,
+                // Stop on the first failure: if the code did not ship, restarting the
+                // container against the old code is not a partial success.
+                'on_success' => 'next',
+                'on_fail'    => 'exit',
+            ];
+        }
+        if (!$steps) return $generated;
+        foreach ($steps as $s) if (($s['type'] ?? '') !== 'publish') return $steps;  // authored — leave it
+        return $generated;
     }
 
     // ---- guards ------------------------------------------------------------

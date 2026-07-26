@@ -2,8 +2,8 @@
 /**
  * Publisher — the one place a project's publish target is decided.
  *
- * Vars: $project, $projectsUrl, $coreUrl, $def, $drivers, $endUrl, $domain, $cron,
- *       $workingUrl, $canTrigger, $bindings, $selected
+ * Vars: $project, $projectsUrl, $coreUrl, $def, $drivers, $repoDrivers, $hostDrivers,
+ *       $domain, $cron, $workingUrl, $canTrigger, $bindings, $chosen
  */
 $h = fn($s) => htmlspecialchars((string) $s);
 $csrf = \app\SimpleCsrf::getTokenArray();
@@ -52,51 +52,64 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
       <div class="card h-100 shadow-sm"><div class="card-body">
         <div class="text-uppercase text-body-secondary small fw-semibold" style="letter-spacing:.06em">Published to</div>
         <?php
-        /* A repository target has no end URL — its result is a branch and a pull request,
-           not a site. Saying "not published yet" there contradicted the target's own
-           "last published" line, so fall back to what the target is bound to. */
-        $__b = $bindings[$selected] ?? null;
+        /* Both targets, when both are chosen — a repository target has no end URL (its
+           result is a branch and a pull request, not a site), so showing only a URL here
+           said "not published yet" directly above the target's own "last published". */
+        $__lines = [];
+        if ($domain !== '') {
+            $__lines[] = '<a href="https://' . $h($domain) . '" target="_blank" rel="noopener">' . $h($domain) . '</a>';
+        } elseif (!empty($chosen['host']) && !empty($bindings[$chosen['host']]['ok'])) {
+            $__lines[] = '<span class="fw-semibold">' . $h($bindings[$chosen['host']]['label']) . '</span>';
+        }
+        if (!empty($chosen['repo']) && !empty($bindings[$chosen['repo']]['ok'])) {
+            $__lines[] = '<span class="fw-semibold">' . $h($bindings[$chosen['repo']]['label']) . '</span>';
+        }
         ?>
         <div class="mt-1">
-          <?php if ($endUrl !== ''): ?>
-            <a href="<?= $h($endUrl) ?>" target="_blank" rel="noopener"><?= $h(parse_url($endUrl, PHP_URL_HOST) ?: $endUrl) ?></a>
-          <?php elseif ($__b && !empty($__b['ok'])): ?>
-            <span class="fw-semibold"><?= $h($__b['label']) ?></span>
-          <?php else: ?>
-            <span class="text-body-secondary">not published yet</span>
-          <?php endif; ?>
+          <?= $__lines ? implode('<br>', $__lines) : '<span class="text-body-secondary">not published yet</span>' ?>
         </div>
-        <div class="text-body-secondary small mt-1">a property of the target below, not of the project</div>
+        <div class="text-body-secondary small mt-1">a property of the targets below, not of the project</div>
       </div></div>
     </div>
   </div>
 
   <div class="card shadow-sm mb-3">
     <div class="card-header d-flex align-items-center gap-2">
-      <i class="bi bi-sliders"></i><span class="fw-semibold">Target</span>
+      <i class="bi bi-sliders"></i><span class="fw-semibold">Targets</span>
       <span class="text-body-secondary small ms-auto">saved as <code>pipelines/publish.json</code> in the project</span>
     </div>
     <div class="card-body">
-      <form id="pub-form" class="row g-3">
-        <div class="col-md-5">
-          <label class="form-label small fw-semibold">How</label>
-          <select id="pub-driver" class="form-select form-select-sm">
-            <?php foreach ($drivers as $d): $sel = $selected === $d['key']; ?>
-              <option value="<?= $h($d['key']) ?>" <?= $sel ? 'selected' : '' ?> <?= empty($d['available']) ? 'disabled' : '' ?>>
+      <?php
+      /* TWO questions, not one choice. Where the code goes and where it runs are
+         independent — a project can open a pull request on its repo AND run in a
+         container — so each gets its own control and either may be "don't". */
+      $group = function (string $id, string $label, string $hint, array $list, string $sel) use ($h) { ?>
+        <div class="col-md-6">
+          <label class="form-label small fw-semibold" for="<?= $h($id) ?>"><?= $h($label) ?></label>
+          <select id="<?= $h($id) ?>" class="form-select form-select-sm pub-target">
+            <option value="">— <?= $h($hint) ?> —</option>
+            <?php foreach ($list as $d): ?>
+              <option value="<?= $h($d['key']) ?>" <?= $sel === $d['key'] ? 'selected' : '' ?> <?= empty($d['available']) ? 'disabled' : '' ?>>
                 <?= $h($d['label']) ?><?= empty($d['available']) ? ' — unavailable' : '' ?>
               </option>
             <?php endforeach; ?>
           </select>
-          <div class="mt-2 small" id="pub-binding"></div>
-          <div class="form-text" id="pub-blurb"></div>
+          <div class="mt-2 small" id="<?= $h($id) ?>-binding"></div>
+          <div class="form-text" id="<?= $h($id) ?>-blurb"></div>
         </div>
-        <div class="col-md-4">
-          <label class="form-label small fw-semibold" id="pub-url-label">End URL</label>
-          <input id="pub-url" class="form-control form-control-sm" placeholder="https://example.com"
-                 value="<?= $h($domain !== '' ? $domain : $endUrl) ?>" autocomplete="off" spellcheck="false">
-          <div class="form-text" id="pub-url-help">Where this publishes to.</div>
+      <?php }; ?>
+
+      <form id="pub-form" class="row g-3">
+        <?php $group('pub-repo', 'Code goes to', 'no repository', $repoDrivers, $chosen['repo']); ?>
+        <?php $group('pub-host', 'Runs on',      'not hosted here', $hostDrivers, $chosen['host']); ?>
+
+        <div class="col-md-6" id="pub-domain-wrap">
+          <label class="form-label small fw-semibold">Domain</label>
+          <input id="pub-domain" class="form-control form-control-sm" placeholder="app.example.com"
+                 value="<?= $h($domain) ?>" autocomplete="off" spellcheck="false">
+          <div class="form-text">Point a CNAME at this control plane first — the certificate is issued for this domain.</div>
         </div>
-        <div class="col-md-3">
+        <div class="col-md-6">
           <label class="form-label small fw-semibold">When</label>
           <input id="pub-cron" class="form-control form-control-sm" placeholder="on demand"
                  value="<?= $h($cron) ?>" autocomplete="off" spellcheck="false">
@@ -126,41 +139,33 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
   const csrf = <?= json_encode($csrf) ?>;
   const msg = document.getElementById('pub-msg');
 
-  // Targets differ enough that the wrong label is worse than none: "we handle the proxy
-  // and the certificate" is actively misleading next to a pull request, and a hosting
-  // target needs a bare hostname where a generic one takes a URL. One field, told what
-  // it means by the selected target.
-  const drivers = <?= json_encode(array_column($drivers, null, 'key')) ?>;
+  const drivers  = <?= json_encode(array_column($drivers, null, 'key')) ?>;
   const bindings = <?= json_encode($bindings) ?>;
-  const driverSel = document.getElementById('pub-driver');
-  const urlIn = document.getElementById('pub-url');
+  const repoSel  = document.getElementById('pub-repo');
+  const hostSel  = document.getElementById('pub-host');
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  function describe() {
-    const d = drivers[driverSel.value] || {}, cap = d.capabilities || {};
-    document.getElementById('pub-blurb').textContent = d.blurb || '';
+
+  function describe(sel) {
+    const d = drivers[sel.value] || {};
+    document.getElementById(sel.id + '-blurb').textContent = d.blurb || '';
     // WHICH repo / WHICH container. Picking a target without seeing what it points at
     // is choosing blind, which is how you publish to the wrong place.
-    const b = bindings[driverSel.value];
-    document.getElementById('pub-binding').innerHTML = !b ? '' :
+    const b = sel.value ? bindings[sel.value] : null;
+    document.getElementById(sel.id + '-binding').innerHTML = !b ? '' :
       '<span class="badge ' + (b.ok ? 'text-bg-success' : 'text-bg-secondary') + '">'
       + '<i class="bi bi-' + (b.ok ? 'check-circle' : 'dash-circle') + ' me-1"></i>' + esc(b.label) + '</span>'
       + '<span class="text-body-secondary ms-2">' + esc(b.detail) + '</span>';
-    // A repository target's URL is the pull request's — discovered, never typed.
-    urlIn.closest('.col-md-4').hidden = !!cap.code;
-    if (cap.domain) {
-      document.getElementById('pub-url-label').textContent = 'Domain';
-      urlIn.placeholder = 'app.example.com';
-      document.getElementById('pub-url-help').textContent =
-        'Point a CNAME at this control plane first — the certificate is issued for this domain.';
-    } else {
-      document.getElementById('pub-url-label').textContent = 'End URL';
-      urlIn.placeholder = 'https://example.com';
-      document.getElementById('pub-url-help').textContent = 'Where this publishes to.';
-    }
   }
-  driverSel.addEventListener('change', describe);
-  describe();
+  function refresh() {
+    describe(repoSel); describe(hostSel);
+    // A domain belongs to whatever binds one — asking for it when nothing does is asking
+    // a question with no consequence.
+    const binds = (drivers[hostSel.value] || {}).capabilities || {};
+    document.getElementById('pub-domain-wrap').hidden = !binds.domain;
+  }
+  document.querySelectorAll('.pub-target').forEach(s => s.addEventListener('change', refresh));
+  refresh();
 
   const say = (t, c) => { msg.className = 'form-text ms-1 ' + (c || 'text-body-secondary'); msg.textContent = t; };
   const post = (url, data) => fetch(url, {
@@ -173,8 +178,9 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
     e.preventDefault();
     say('Saving…');
     post('/publish/save', {
-      driver: document.getElementById('pub-driver').value,
-      url:    document.getElementById('pub-url').value.trim(),
+      repo:   repoSel.value,
+      host:   hostSel.value,
+      domain: document.getElementById('pub-domain').value.trim(),
       cron:   document.getElementById('pub-cron').value.trim()
     }).then(j => say(j.success ? (j.message || 'Saved.') : (j.message || 'Failed.'), j.success ? 'text-success' : 'text-danger'))
       .catch(() => say('Network error.', 'text-danger'));
