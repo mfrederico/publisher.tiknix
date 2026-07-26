@@ -3,7 +3,7 @@
  * Publisher — the one place a project's publish target is decided.
  *
  * Vars: $project, $projectsUrl, $coreUrl, $def, $drivers, $repoDrivers, $hostDrivers,
- *       $domain, $cron, $workingUrl, $canTrigger, $bindings, $chosen
+ *       $cron, $workingUrl, $canTrigger, $bindings, $chosen (keys), $settings
  */
 $h = fn($s) => htmlspecialchars((string) $s);
 $csrf = \app\SimpleCsrf::getTokenArray();
@@ -52,17 +52,20 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
       <div class="card h-100 shadow-sm"><div class="card-body">
         <div class="text-uppercase text-body-secondary small fw-semibold" style="letter-spacing:.06em">Published to</div>
         <?php
-        /* Both targets, when both are chosen — a repository target has no end URL (its
-           result is a branch and a pull request, not a site), so showing only a URL here
-           said "not published yet" directly above the target's own "last published". */
+        /* Every chosen target, not one — a repository target has no end URL (its result is
+           a branch and a pull request, not a site), so showing only a URL here said "not
+           published yet" directly above a target's own "last published". */
         $__lines = [];
-        if ($domain !== '') {
-            $__lines[] = '<a href="https://' . $h($domain) . '" target="_blank" rel="noopener">' . $h($domain) . '</a>';
-        } elseif (!empty($chosen['host']) && !empty($bindings[$chosen['host']]['ok'])) {
-            $__lines[] = '<span class="fw-semibold">' . $h($bindings[$chosen['host']]['label']) . '</span>';
-        }
-        if (!empty($chosen['repo']) && !empty($bindings[$chosen['repo']]['ok'])) {
-            $__lines[] = '<span class="fw-semibold">' . $h($bindings[$chosen['repo']]['label']) . '</span>';
+        foreach ($chosen as $__k) {
+            $__d = (string) ($settings[$__k]['domain'] ?? '');
+            if ($__d !== '') { $__lines[] = '<a href="https://' . $h($__d) . '" target="_blank" rel="noopener">' . $h($__d) . '</a>'; continue; }
+            $__host = (string) ($settings[$__k]['host'] ?? '');
+            if ($__host !== '') {
+                $__p = (string) ($settings[$__k]['path'] ?? '');
+                $__lines[] = '<span class="fw-semibold">' . $h($__host . ($__p !== '' ? ':' . $__p : '')) . '</span>';
+                continue;
+            }
+            if (!empty($bindings[$__k]['ok'])) $__lines[] = '<span class="fw-semibold">' . $h($bindings[$__k]['label']) . '</span>';
         }
         ?>
         <div class="mt-1">
@@ -80,36 +83,82 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
     </div>
     <div class="card-body">
       <?php
-      /* TWO questions, not one choice. Where the code goes and where it runs are
-         independent — a project can open a pull request on its repo AND run in a
-         container — so each gets its own control and either may be "don't". */
-      $group = function (string $id, string $label, string $hint, array $list, string $sel) use ($h) { ?>
-        <div class="col-md-6">
-          <label class="form-label small fw-semibold" for="<?= $h($id) ?>"><?= $h($label) ?></label>
-          <select id="<?= $h($id) ?>" class="form-select form-select-sm pub-target">
-            <option value="">— <?= $h($hint) ?> —</option>
-            <?php foreach ($list as $d): ?>
-              <option value="<?= $h($d['key']) ?>" <?= $sel === $d['key'] ? 'selected' : '' ?> <?= empty($d['available']) ? 'disabled' : '' ?>>
-                <?= $h($d['label']) ?><?= empty($d['available']) ? ' — unavailable' : '' ?>
-              </option>
-            <?php endforeach; ?>
-          </select>
-          <div class="mt-2 small" id="<?= $h($id) ?>-binding"></div>
-          <div class="form-text" id="<?= $h($id) ?>-blurb"></div>
+      /* TWO questions, not one choice: where the code goes and where it runs are
+         independent. Both allow SEVERAL — a project can perfectly well open a pull request
+         for review AND rsync to a production box — so these are checkboxes, and each
+         target renders whatever settings IT declares. Nothing here knows what an rsync
+         target needs; the driver says. */
+      $target = function (array $d) use ($h, $chosen, $settings, $bindings) {
+          $on   = in_array($d['key'], $chosen, true);
+          $vals = (array) ($settings[$d['key']] ?? []);
+          $id   = 'tgt-' . preg_replace('/[^a-z0-9]/', '', $d['key']);
+          ?>
+        <div class="col-12 pub-target-row">
+          <div class="form-check">
+            <input class="form-check-input pub-target" type="checkbox" id="<?= $h($id) ?>"
+                   value="<?= $h($d['key']) ?>" <?= $on ? 'checked' : '' ?> <?= empty($d['available']) ? 'disabled' : '' ?>>
+            <label class="form-check-label fw-semibold" for="<?= $h($id) ?>"><?= $h($d['label']) ?></label>
+            <?php if (empty($d['available'])): ?>
+              <span class="badge text-bg-warning ms-1">unavailable</span>
+              <div class="form-text"><?= $h($d['reason']) ?></div>
+            <?php else: ?>
+              <div class="form-text"><?= $h($d['blurb']) ?></div>
+              <?php $b = $bindings[$d['key']] ?? null; if ($b): ?>
+                <div class="small mt-1">
+                  <span class="badge <?= !empty($b['ok']) ? 'text-bg-success' : 'text-bg-secondary' ?>">
+                    <i class="bi bi-<?= !empty($b['ok']) ? 'check-circle' : 'dash-circle' ?> me-1"></i><?= $h($b['label']) ?>
+                  </span>
+                  <span class="text-body-secondary ms-2"><?= $h($b['detail']) ?></span>
+                </div>
+                <?php if (!empty($b['publicKey'])): ?>
+                  <?php /* The public half, right where the operator needs it. Withholding
+                           it would mean the first publish fails and they have to go
+                           looking for what to authorise. */ ?>
+                  <details class="mt-1">
+                    <summary class="small text-body-secondary" style="cursor:pointer">Public key to add to <code>authorized_keys</code></summary>
+                    <textarea class="form-control form-control-sm mt-1" rows="2" readonly onclick="this.select()"><?= $h($b['publicKey']) ?></textarea>
+                  </details>
+                <?php endif; ?>
+              <?php endif; ?>
+            <?php endif; ?>
+          </div>
+          <?php if (!empty($d['fields'])): ?>
+            <div class="row g-2 mt-1 ms-1 ps-3 border-start pub-fields" data-for="<?= $h($d['key']) ?>" <?= $on ? '' : 'hidden' ?>>
+              <?php foreach ($d['fields'] as $f):
+                $fname = (string) $f['name'];
+                $val   = (string) ($vals[$fname] ?? '');
+                $wide  = ($f['type'] ?? '') === 'textarea'; ?>
+                <div class="<?= $wide ? 'col-12' : 'col-sm-4' ?>">
+                  <label class="form-label small fw-semibold mb-1"><?= $h($f['label'] ?? $fname) ?><?php if (!empty($f['required'])): ?><span class="text-danger">*</span><?php endif; ?></label>
+                  <?php if ($wide): ?>
+                    <textarea rows="2" class="form-control form-control-sm pub-field" spellcheck="false"
+                              data-target="<?= $h($d['key']) ?>" data-field="<?= $h($fname) ?>"
+                              placeholder="<?= $h($f['placeholder'] ?? '') ?>"><?= $h($val) ?></textarea>
+                  <?php else: ?>
+                    <input class="form-control form-control-sm pub-field" autocomplete="off" spellcheck="false"
+                           data-target="<?= $h($d['key']) ?>" data-field="<?= $h($fname) ?>"
+                           placeholder="<?= $h($f['placeholder'] ?? '') ?>" value="<?= $h($val) ?>">
+                  <?php endif; ?>
+                  <?php if (!empty($f['help'])): ?><div class="form-text"><?= $h($f['help']) ?></div><?php endif; ?>
+                </div>
+              <?php endforeach; ?>
+            </div>
+          <?php endif; ?>
         </div>
       <?php }; ?>
 
       <form id="pub-form" class="row g-3">
-        <?php $group('pub-repo', 'Code goes to', 'no repository', $repoDrivers, $chosen['repo']); ?>
-        <?php $group('pub-host', 'Runs on',      'not hosted here', $hostDrivers, $chosen['host']); ?>
-
-        <div class="col-md-6" id="pub-domain-wrap">
-          <label class="form-label small fw-semibold">Domain</label>
-          <input id="pub-domain" class="form-control form-control-sm" placeholder="app.example.com"
-                 value="<?= $h($domain) ?>" autocomplete="off" spellcheck="false">
-          <div class="form-text">Point a CNAME at this control plane first — the certificate is issued for this domain.</div>
+        <div class="col-12">
+          <div class="text-uppercase text-body-secondary small fw-semibold" style="letter-spacing:.06em">Code goes to</div>
         </div>
-        <div class="col-md-6">
+        <?php foreach ($repoDrivers as $d) $target($d); ?>
+
+        <div class="col-12 mt-3">
+          <div class="text-uppercase text-body-secondary small fw-semibold" style="letter-spacing:.06em">Runs on</div>
+        </div>
+        <?php foreach ($hostDrivers as $d) $target($d); ?>
+
+        <div class="col-md-4 mt-3">
           <label class="form-label small fw-semibold">When</label>
           <input id="pub-cron" class="form-control form-control-sm" placeholder="on demand"
                  value="<?= $h($cron) ?>" autocomplete="off" spellcheck="false">
@@ -139,56 +188,46 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
   const csrf = <?= json_encode($csrf) ?>;
   const msg = document.getElementById('pub-msg');
 
-  const drivers  = <?= json_encode(array_column($drivers, null, 'key')) ?>;
-  const bindings = <?= json_encode($bindings) ?>;
-  const repoSel  = document.getElementById('pub-repo');
-  const hostSel  = document.getElementById('pub-host');
-  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const boxes = Array.from(document.querySelectorAll('.pub-target'));
 
-  function describe(sel) {
-    const d = drivers[sel.value] || {};
-    document.getElementById(sel.id + '-blurb').textContent = d.blurb || '';
-    // WHICH repo / WHICH container. Picking a target without seeing what it points at
-    // is choosing blind, which is how you publish to the wrong place.
-    const b = sel.value ? bindings[sel.value] : null;
-    document.getElementById(sel.id + '-binding').innerHTML = !b ? '' :
-      '<span class="badge ' + (b.ok ? 'text-bg-success' : 'text-bg-secondary') + '">'
-      + '<i class="bi bi-' + (b.ok ? 'check-circle' : 'dash-circle') + ' me-1"></i>' + esc(b.label) + '</span>'
-      + '<span class="text-body-secondary ms-2">' + esc(b.detail) + '</span>';
-  }
+  // A target's settings are only a question if the target is chosen.
   function refresh() {
-    describe(repoSel); describe(hostSel);
-    // A domain belongs to whatever binds one — asking for it when nothing does is asking
-    // a question with no consequence.
-    const binds = (drivers[hostSel.value] || {}).capabilities || {};
-    document.getElementById('pub-domain-wrap').hidden = !binds.domain;
+    boxes.forEach(b => {
+      const fields = document.querySelector('.pub-fields[data-for="' + b.value + '"]');
+      if (fields) fields.hidden = !b.checked;
+    });
   }
-  document.querySelectorAll('.pub-target').forEach(s => s.addEventListener('change', refresh));
+  boxes.forEach(b => b.addEventListener('change', refresh));
   refresh();
 
   const say = (t, c) => { msg.className = 'form-text ms-1 ' + (c || 'text-body-secondary'); msg.textContent = t; };
-  const post = (url, data) => fetch(url, {
+  const post = (url, params) => fetch(url, {
     method: 'POST',
     headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest'},
-    body: new URLSearchParams(Object.assign({}, csrf, data)).toString()
+    body: params.toString()
   }).then(r => r.json());
+  const withCsrf = () => { const p = new URLSearchParams(); for (const k in csrf) p.append(k, csrf[k]); return p; };
 
   document.getElementById('pub-form').addEventListener('submit', function (e) {
     e.preventDefault();
     say('Saving…');
-    post('/publish/save', {
-      repo:   repoSel.value,
-      host:   hostSel.value,
-      domain: document.getElementById('pub-domain').value.trim(),
-      cron:   document.getElementById('pub-cron').value.trim()
-    }).then(j => say(j.success ? (j.message || 'Saved.') : (j.message || 'Failed.'), j.success ? 'text-success' : 'text-danger'))
+    const p = withCsrf();
+    boxes.filter(b => b.checked).forEach(b => p.append('targets[]', b.value));
+    // Only the chosen targets' settings — a field left behind by an unchecked target is
+    // not part of what this pipeline does.
+    document.querySelectorAll('.pub-field').forEach(f => {
+      const box = boxes.find(b => b.value === f.dataset.target);
+      if (box && box.checked) p.append('cfg[' + f.dataset.target + '][' + f.dataset.field + ']', f.value.trim());
+    });
+    p.append('cron', document.getElementById('pub-cron').value.trim());
+    post('/publish/save', p)
+      .then(j => say(j.success ? (j.message || 'Saved.') : (j.message || 'Failed.'), j.success ? 'text-success' : 'text-danger'))
       .catch(() => say('Network error.', 'text-danger'));
   });
 
   document.getElementById('pub-run').addEventListener('click', function () {
     say('Starting…');
-    post('/publish/run', {}).then(j => {
+    post('/publish/run', withCsrf()).then(j => {
       say(j.success ? (j.message || 'Publishing…') + ' run #' + (j.data && j.data.run_id) : (j.message || 'Failed.'),
           j.success ? 'text-success' : 'text-danger');
     }).catch(() => say('Network error.', 'text-danger'));

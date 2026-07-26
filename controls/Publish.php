@@ -51,44 +51,31 @@ class Publish extends Control {
             'repoDrivers' => \app\Publish\PublishRegistry::repository(),
             'hostDrivers' => \app\Publish\PublishRegistry::hosting(),
             'drivers'     => \app\Publish\PublishRegistry::all(),
-            // A hosting target's domain IS its end URL, but the driver needs it as a bare
-            // hostname, so it is stored as one and shown as one.
-            'domain'      => (string) ($def['publish']['domain'] ?? ''),
             'cron'        => (string) ($def['trigger']['cron'] ?? ''),
             'workingUrl'  => rtrim((string) ($cfg['app']['baseurl'] ?? ''), '/'),
             'canTrigger'  => (string) ($cfg['pipeline']['trigger_secret'] ?? '') !== '',
             'bindings'    => $bindings,
-            'chosen'      => $this->chosen($def, $bindings),
+            'chosen'      => $this->savedTargets($def),
+            'settings'    => $this->savedSettings($def),
         ], false);
     }
 
     /**
-     * The target selected in each group, as [group => driver key|''].
-     *
-     * A saved pipeline always wins — it is the project's decision. With none, preselect a
-     * target that is actually BOUND to something, so connecting a repo and coming here
-     * lands on that repo instead of on a hosting target the project has never used.
-     *
-     * Deliberately NOT the same as creating the pipeline: connecting a repo says where
-     * code MAY go, not that every change should be published there, and writing a file
-     * into someone's repo as a side effect of connecting is not ours to do. This only
-     * means one Save away instead of a dropdown hunt.
-     *
-     * @return array{repo:string,host:string}
+     * Per-target settings already saved in the pipeline, as [driver => [field => value]].
+     * Read from the STEPS for the same reason savedTargets() is: the steps are what runs.
      */
-    private function chosen(?array $def, array $bindings): array {
-        $saved = $this->savedTargets($def);
-        $pick = function (array $group) use ($saved, $bindings): string {
-            $keys = array_column($group, 'key');
-            foreach ($saved as $k) if (in_array($k, $keys, true)) return $k;   // the project's choice
-            if ($saved) return '';                                             // it chose NOT to use this group
-            foreach ($keys as $k) if (!empty($bindings[$k]['ok'])) return $k;  // else: whatever is bound
-            return '';
-        };
-        return [
-            'repo' => $pick(\app\Publish\PublishRegistry::repository()),
-            'host' => $pick(\app\Publish\PublishRegistry::hosting()),
-        ];
+    private function savedSettings(?array $def): array {
+        $out = [];
+        foreach ((array) ($def['steps'] ?? []) as $step) {
+            if (($step['type'] ?? '') !== 'publish') continue;
+            $t = (string) ($step['config']['target'] ?? '');
+            if ($t !== '') $out[$t] = (array) ($step['config']['config'] ?? []);
+        }
+        // The legacy single-target shape kept the domain in the metadata block.
+        if (!$out && ($def['publish']['domain'] ?? '') !== '') {
+            $out[(string) ($def['publish']['driver'] ?? 'tiknix-hosted')] = ['domain' => (string) $def['publish']['domain']];
+        }
+        return $out;
     }
 
     /**
@@ -142,6 +129,35 @@ class Publish extends Control {
                    'detail' => 'Connect one on the Connections page, then publish.'];
         }
 
+        // ssh/rsync: the keypair is generated on the control plane on first publish, so
+        // what matters here is whether the customer has authorised it yet.
+        $st = $core->prepare('SELECT connector_type, metadata_json, last_used_at, last_error FROM connections
+             WHERE instance_id = ? AND connector_type IN (?, ?)');
+        if ($st && $st->execute([$instanceId, 'rsync', 'ssh'])) {
+            foreach ($st->fetchAll(\PDO::FETCH_ASSOC) ?: [] as $r) {
+                $meta  = json_decode((string) $r['metadata_json'], true) ?: [];
+                $fp    = (string) ($meta['fingerprint'] ?? '');
+                // last_used_at records the ATTEMPT, so it is set after a rejected key too —
+                // reporting "last published" on the strength of it would be a plain lie.
+                $err   = trim((string) ($r['last_error'] ?? ''));
+                $used  = trim((string) ($r['last_used_at'] ?? ''));
+                $out[(string) $r['connector_type']] = [
+                    // ssh-keygen -l prints "256 SHA256:… comment (ED25519)"; the hash alone
+                    // is what anyone compares against, and it has to fit on a badge.
+                    'label'  => $fp !== '' ? (explode(' ', $fp)[1] ?? 'Key ready') : 'Key ready',
+                    'ok'     => $used !== '' && $err === '',
+                    'detail' => $err !== '' ? $err
+                        : ($used !== '' ? 'last published ' . $used
+                                        : 'not yet accepted by the server — add the public key below to authorized_keys'),
+                    'publicKey' => (string) ($meta['public_key'] ?? ''),
+                ];
+            }
+        }
+        foreach (['rsync', 'ssh'] as $k) {
+            $out[$k] = $out[$k] ?? ['label' => 'No key yet', 'ok' => false,
+                'detail' => 'A keypair is generated on the first publish; you then add its public half to the server.'];
+        }
+
         $st = $core->prepare('SELECT ct_vmid FROM instance WHERE id = ?');
         if ($st && $st->execute([$instanceId])) {
             $vmid = (int) ($st->fetchColumn() ?: 0);
@@ -157,23 +173,23 @@ class Publish extends Control {
         [$s, $inst] = $this->guard(true);
         if (!$inst) return;
 
-        // Ship the code first, then bring the runtime in line with it — the order a person
-        // would do it by hand. Either may be blank: publishing to a repo without hosting,
-        // or hosting without a repo, are both perfectly ordinary.
+        // Registry order, so the steps come out ship-the-code-then-bring-the-runtime-in-line
+        // regardless of the order the form posted them. Any number of targets, including
+        // one: publishing to a repo without hosting, or hosting without a repo, are both
+        // perfectly ordinary.
+        $wanted = array_filter(array_map('strval', (array) $this->getParam('targets', [])));
+        $cfgIn  = (array) $this->getParam('cfg', []);
         $targets = [];
-        foreach (['repo', 'host'] as $group) {
-            $key = trim((string) $this->getParam($group, ''));
-            if ($key === '') continue;
-            if (!\app\Publish\PublishRegistry::driver($key)) { Flight::jsonError('Unknown publish target: ' . $key, 400); return; }
-            $targets[] = $key;
+        $settings = [];
+        foreach (\app\Publish\PublishRegistry::all() as $d) {
+            if (!in_array($d['key'], $wanted, true)) continue;
+            if (empty($d['available'])) { Flight::jsonError($d['label'] . ' is not available: ' . $d['reason'], 400); return; }
+            $vals = $this->validateFields($d, (array) ($cfgIn[$d['key']] ?? []));
+            if (isset($vals['error'])) { Flight::jsonError($d['label'] . ': ' . $vals['error'], 400); return; }
+            $targets[]              = $d['key'];
+            $settings[$d['key']]    = $vals['values'];
         }
-        if (!$targets) { Flight::jsonError('Choose at least one target — a repository, a place to run, or both.', 400); return; }
-
-        // A hosting target binds a hostname: the field holds a bare domain, not a URL, and
-        // the driver + capricorn + the certificate all key off it. Validate it HERE rather
-        // than trusting the far end — this value ends up in a proxy file and a cert request.
-        $domain = strtolower(trim((string) $this->getParam('domain', '')));
-        if ($domain !== '' && !$this->validHost($domain)) { Flight::jsonError('That is not a valid domain name.', 400); return; }
+        if (!$targets) { Flight::jsonError('Choose at least one target.', 400); return; }
 
         $cron   = trim((string) $this->getParam('cron', ''));
         $dir    = $this->instanceDir($inst);
@@ -182,11 +198,15 @@ class Publish extends Control {
 
         $def['slug']    = self::PIPELINE;
         $def['name']    = 'Publish';
-        $def['steps']   = $this->steps($def['steps'] ?? [], $targets, $domain);
+        $def['steps']   = $this->steps($def['steps'] ?? [], $targets, $settings);
         $def['publish'] = ['targets' => $targets];
-        if ($domain !== '') {
-            $def['publish']['domain'] = $domain;
-            $def['publish']['url']    = 'https://' . $domain;
+        // The end URL, when a target binds one. Kept in the metadata block because it is
+        // the one thing about a publish that other pages want to show.
+        foreach ($settings as $vals) {
+            if (!empty($vals['domain'])) {
+                $def['publish']['domain'] = $vals['domain'];
+                $def['publish']['url']    = 'https://' . $vals['domain'];
+            }
         }
         if ($cron !== '') $def['trigger'] = ['cron' => $cron];
         else unset($def['trigger']);
@@ -251,17 +271,14 @@ class Publish extends Control {
      * /publish/run, and core resolves the instance from that key alone. See
      * lib/Pipeline/Steps/PublishStep.php.
      *
-     * @param string[] $targets
+     * @param string[]                    $targets
+     * @param array<string,array<string,mixed>> $settings per-target field values
      */
-    private function steps(array $steps, array $targets, string $domain = ''): array {
+    private function steps(array $steps, array $targets, array $settings = []): array {
         $generated = [];
         foreach ($targets as $t) {
-            $driver = \app\Publish\PublishRegistry::driver($t);
             $config = ['target' => $t, 'op' => 'deploy'];
-            // The domain belongs to whichever target actually binds one.
-            if ($domain !== '' && $driver && !empty($driver::capabilities()['domain'])) {
-                $config['config'] = ['domain' => $domain];
-            }
+            if (!empty($settings[$t])) $config['config'] = $settings[$t];
             // Standing a container up runs a chain of hypervisor tasks and can pass a
             // minute; the step default (120s) would report a timeout while the deploy was
             // still succeeding, which is the worst possible answer.
@@ -305,6 +322,40 @@ class Publish extends Control {
             return [$s, null];
         }
         return [$s, $inst];
+    }
+
+    /**
+     * Check a target's posted settings against the fields IT declares.
+     *
+     * Driven by the driver's own fields() so adding a target never means touching this
+     * method. Validated here as well as in the driver, because these values are written
+     * into the project's repo — a bad host should be refused at the point someone typed
+     * it, not discovered on a failed publish.
+     *
+     * @return array{values:array}|array{error:string}
+     */
+    private function validateFields(array $driver, array $posted): array {
+        $out = [];
+        foreach ((array) ($driver['fields'] ?? []) as $f) {
+            $name = (string) ($f['name'] ?? '');
+            if ($name === '') continue;
+            $v = trim((string) ($posted[$name] ?? ''));
+
+            if ($v === '') {
+                if (!empty($f['required'])) return ['error' => ($f['label'] ?? $name) . ' is required.'];
+                continue;                                    // omit rather than store empties
+            }
+            if (($f['type'] ?? '') === 'host') {
+                $v = strtolower($v);
+                if (!$this->validHost($v)) return ['error' => ($f['label'] ?? $name) . ' is not a valid hostname.'];
+            }
+            if (($f['type'] ?? '') === 'number') {
+                if (!ctype_digit($v)) return ['error' => ($f['label'] ?? $name) . ' must be a number.'];
+                $v = (int) $v;
+            }
+            $out[$name] = $v;
+        }
+        return ['values' => $out];
     }
 
     /** Strict host allowlist, mirroring capricorn's valid_host: DNS chars, no traversal. */
