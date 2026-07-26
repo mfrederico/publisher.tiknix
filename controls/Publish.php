@@ -173,15 +173,20 @@ class Publish extends Control {
         [$s, $inst] = $this->guard(true);
         if (!$inst) return;
 
-        // Registry order, so the steps come out ship-the-code-then-bring-the-runtime-in-line
-        // regardless of the order the form posted them. Any number of targets, including
-        // one: publishing to a repo without hosting, or hosting without a repo, are both
-        // perfectly ordinary.
+        // Deliver the code, THEN bring the runtime in line with it — the order a person
+        // would do it by hand, and the order the on_fail:exit below assumes. Explicitly
+        // repository-then-hosting rather than registry order, which lists hosting first
+        // and would restart the container against code that had not shipped yet.
+        //
+        // Any number of targets, including one: publishing to a repo without hosting, or
+        // hosting without a repo, are both perfectly ordinary.
         $wanted = array_filter(array_map('strval', (array) $this->getParam('targets', [])));
         $cfgIn  = (array) $this->getParam('cfg', []);
         $targets = [];
         $settings = [];
-        foreach (\app\Publish\PublishRegistry::all() as $d) {
+        $ordered = array_merge(\app\Publish\PublishRegistry::repository(),
+                               \app\Publish\PublishRegistry::hosting());
+        foreach ($ordered as $d) {
             if (!in_array($d['key'], $wanted, true)) continue;
             if (empty($d['available'])) { Flight::jsonError($d['label'] . ' is not available: ' . $d['reason'], 400); return; }
             $vals = $this->validateFields($d, (array) ($cfgIn[$d['key']] ?? []));
