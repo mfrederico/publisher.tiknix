@@ -306,6 +306,41 @@ class Publish extends Control {
         return $generated;
     }
 
+    /**
+     * GET /publish/status?run=<id> — what the publish is doing, step by step.
+     *
+     * Proxied rather than read from the instance's database directly: a containerised
+     * tenant's database is inside its container and not on this filesystem at all, so
+     * anything that reached for the file would work in development and quietly fail for
+     * exactly the tenants that need watching most. The instance's own status endpoint
+     * works either way.
+     */
+    public function status($params = []): void {
+        [$s, $inst] = $this->guard(true);
+        if (!$inst) return;
+
+        $runId = (int) $this->getParam('run', 0);
+        if ($runId <= 0) { Flight::jsonError('No run.', 400); return; }
+
+        $cfg    = @parse_ini_file($this->instanceDir($inst) . '/conf/config.ini', true) ?: [];
+        $base   = rtrim((string) ($cfg['app']['baseurl'] ?? ''), '/');
+        $secret = (string) ($cfg['pipeline']['trigger_secret'] ?? '');
+        if ($base === '' || $secret === '') { Flight::jsonError('This project has no pipeline trigger configured.', 400); return; }
+
+        $ch = curl_init($base . '/pipeline/status/' . $runId);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15,
+            CURLOPT_HTTPHEADER     => ['Accept: application/json', 'Authorization: Bearer ' . $secret],
+        ]);
+        $body = (string) curl_exec($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $d    = json_decode($body, true);
+        if ($code !== 200 || !is_array($d)) {
+            Flight::jsonError('Could not read the run (HTTP ' . $code . ').', 502); return;
+        }
+        Flight::jsonSuccess($d);
+    }
+
     // ---- guards ------------------------------------------------------------
 
     /** Session + the SELECTED project. No ?inst: core owns which project this is. */

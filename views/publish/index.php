@@ -172,6 +172,18 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
           <span id="pub-msg" class="form-text ms-1"></span>
         </div>
       </form>
+
+      <?php /* What it is actually doing. A publish is several steps against several
+               services; "run #15" tells you nothing about which target refused you. */ ?>
+      <div id="pub-run-log" class="mt-3" hidden>
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <span class="fw-semibold small">Run <span id="pub-run-id"></span></span>
+          <span id="pub-run-state" class="badge text-bg-secondary">queued</span>
+          <a id="pub-run-editor" class="small ms-auto" target="_top"
+             href="<?= $h($coreUrl) ?>/sidecar/app/pipelines">Open in the Pipeline Editor</a>
+        </div>
+        <div id="pub-run-steps" class="small"></div>
+      </div>
     </div>
   </div>
 
@@ -225,11 +237,63 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
       .catch(() => say('Network error.', 'text-danger'));
   });
 
+  // --- live run log ---------------------------------------------------------
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const logBox   = document.getElementById('pub-run-log');
+  const stepsBox = document.getElementById('pub-run-steps');
+  const BADGE = {completed: 'text-bg-success', failed: 'text-bg-danger', running: 'text-bg-primary'};
+  let poll = null;
+
+  function renderRun(d) {
+    document.getElementById('pub-run-state').className = 'badge ' + (BADGE[d.status] || 'text-bg-secondary');
+    document.getElementById('pub-run-state').textContent =
+      d.status + (d.steps_total ? ' · ' + d.steps_done + '/' + d.steps_total : '');
+
+    stepsBox.innerHTML = (d.steps || []).map(s => {
+      // stderr matters more than stdout when a step failed — that is where the driver
+      // put the reason, and burying it under "failed" is the whole problem.
+      const body = (s.status === 'failed' && s.stderr ? s.stderr : s.stdout) || '';
+      const icon = s.status === 'completed' ? 'check-circle text-success'
+                 : s.status === 'failed' ? 'x-circle text-danger'
+                 : 'arrow-repeat text-primary';
+      return '<div class="mb-2">'
+        + '<div><i class="bi bi-' + icon + ' me-1"></i><code>' + esc(s.name) + '</code>'
+        + (s.duration ? ' <span class="text-body-secondary">' + (s.duration / 1000).toFixed(1) + 's</span>' : '')
+        + '</div>'
+        + (body ? '<pre class="mb-0 mt-1 p-2 rounded bg-body-secondary" style="white-space:pre-wrap;font-size:.75rem">'
+                  + esc(body) + '</pre>' : '')
+        + '</div>';
+    }).join('') || '<div class="text-body-secondary">waiting for the first step…</div>';
+
+    if (d.status === 'failed' && d.error) {
+      stepsBox.innerHTML += '<div class="alert alert-danger py-2 px-3 mb-0">' + esc(d.error) + '</div>';
+    }
+  }
+
+  function watch(runId) {
+    document.getElementById('pub-run-id').textContent = '#' + runId;
+    stepsBox.innerHTML = '';
+    logBox.hidden = false;
+    if (poll) clearInterval(poll);
+    const tick = () => fetch('/publish/status?run=' + runId, {headers: {'X-Requested-With': 'XMLHttpRequest'}})
+      .then(r => r.json())
+      .then(j => {
+        if (!j.success) return;
+        renderRun(j.data);
+        // Stop polling once it settles; a finished run will not change again.
+        if (j.data.status !== 'running' && j.data.status !== 'queued') { clearInterval(poll); poll = null; }
+      }).catch(() => {});
+    tick();
+    poll = setInterval(tick, 2000);
+  }
+
   document.getElementById('pub-run').addEventListener('click', function () {
     say('Starting…');
     post('/publish/run', withCsrf()).then(j => {
-      say(j.success ? (j.message || 'Publishing…') + ' run #' + (j.data && j.data.run_id) : (j.message || 'Failed.'),
+      say(j.success ? (j.message || 'Publishing…') : (j.message || 'Failed.'),
           j.success ? 'text-success' : 'text-danger');
+      if (j.success && j.data && j.data.run_id) watch(j.data.run_id);
     }).catch(() => say('Network error.', 'text-danger'));
   });
 })();
