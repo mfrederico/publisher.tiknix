@@ -144,6 +144,18 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
               <?php endforeach; ?>
             </div>
           <?php endif; ?>
+          <?php if (!empty($d['available'])): ?>
+            <?php /* The handshake. These targets own the CONNECTION and nothing else — the
+                     recipe is the customer's pipeline — so proving the connection is the
+                     driver's real deliverable, and it has to be answerable without firing
+                     a real publish and reading the wreckage. */ ?>
+            <div class="mt-1 ms-1 ps-3 pub-verify-row" data-for="<?= $h($d['key']) ?>" <?= in_array($d['key'], $chosen, true) ? '' : 'hidden' ?>>
+              <button type="button" class="btn btn-outline-secondary btn-sm pub-verify" data-target="<?= $h($d['key']) ?>">
+                <i class="bi bi-plug me-1"></i>Test connection
+              </button>
+              <span class="small ms-2" id="verify-<?= $h(preg_replace('/[^a-z0-9]/', '', $d['key'])) ?>"></span>
+            </div>
+          <?php endif; ?>
         </div>
       <?php }; ?>
 
@@ -207,10 +219,35 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
     boxes.forEach(b => {
       const fields = document.querySelector('.pub-fields[data-for="' + b.value + '"]');
       if (fields) fields.hidden = !b.checked;
+      const verify = document.querySelector('.pub-verify-row[data-for="' + b.value + '"]');
+      if (verify) verify.hidden = !b.checked;
     });
   }
   boxes.forEach(b => b.addEventListener('change', refresh));
   refresh();
+
+  // --- handshake ------------------------------------------------------------
+  document.querySelectorAll('.pub-verify').forEach(btn => btn.addEventListener('click', function () {
+    const key = this.dataset.target;
+    const out = document.getElementById('verify-' + key.replace(/[^a-z0-9]/g, ''));
+    const p = withCsrf();
+    p.append('target', key);
+    // The values as TYPED, not as saved — the point is to find out before committing.
+    document.querySelectorAll('.pub-field[data-target="' + key + '"]').forEach(f =>
+      p.append('cfg[' + f.dataset.field + ']', f.value.trim()));
+
+    this.disabled = true;
+    out.className = 'small ms-2 text-body-secondary';
+    out.textContent = 'Connecting…';
+    post('/publish/verify', p).then(j => {
+      const ok = j.success && j.data && j.data.ok;
+      out.className = 'small ms-2 ' + (ok ? 'text-success' : 'text-danger');
+      const detail = (j.data && j.data.detail || []).map(d => '<div>' + esc(d) + '</div>').join('');
+      out.innerHTML = '<i class="bi bi-' + (ok ? 'check-circle' : 'exclamation-triangle') + ' me-1"></i>'
+        + esc(j.message || (ok ? 'Connection works.' : 'Failed.')) + detail;
+    }).catch(() => { out.className = 'small ms-2 text-danger'; out.textContent = 'Network error.'; })
+      .finally(() => { this.disabled = false; });
+  }));
 
   const say = (t, c) => { msg.className = 'form-text ms-1 ' + (c || 'text-body-secondary'); msg.textContent = t; };
   const post = (url, params) => fetch(url, {

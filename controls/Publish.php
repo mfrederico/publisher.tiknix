@@ -341,6 +341,56 @@ class Publish extends Control {
         Flight::jsonSuccess($d);
     }
 
+    /**
+     * POST /publish/verify — handshake a target with the settings as currently entered.
+     *
+     * Runs BEFORE anything is saved, which is the whole value: you find out that a key was
+     * never authorised, or that the deploy user cannot write to the directory, while you
+     * are still looking at the form.
+     *
+     * Presented with the instance's own broker key, read from its config directory —
+     * the same place this sidecar already reads its trigger_secret from, and the same
+     * credential its pipelines use. No new custody, and core still resolves WHICH instance
+     * from the key rather than from anything sent here.
+     */
+    public function verify($params = []): void {
+        [$s, $inst] = $this->guard(true);
+        if (!$inst) return;
+
+        $target = (string) $this->getParam('target', '');
+        $d = \app\Publish\PublishRegistry::driver($target);
+        if (!$d) { Flight::jsonError('Unknown publish target.', 400); return; }
+
+        $dir = $this->instanceDir($inst);
+        $ini = @parse_ini_file($dir . '/conf/broker.ini', true) ?: [];
+        $key = (string) ($ini['broker']['key'] ?? '');
+        $endpoint = (string) ($ini['broker']['endpoint'] ?? '');
+        if ($key === '' || $endpoint === '') { Flight::jsonError('This project has no broker key yet — publish once from the Connections page first.', 400); return; }
+
+        $parts = parse_url($endpoint);
+        $core  = ($parts['scheme'] ?? 'https') . '://' . ($parts['host'] ?? '')
+               . (isset($parts['port']) ? ':' . $parts['port'] : '');
+
+        // Unsaved values, validated the same way Save validates them — a handshake against
+        // a bad hostname should say so rather than produce a confusing connection error.
+        $vals = $this->validateFields(['fields' => $d::fields()], (array) $this->getParam('cfg', []));
+        if (isset($vals['error'])) { Flight::jsonError($vals['error'], 400); return; }
+
+        $ch = curl_init($core . '/publish/run');
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 40,
+            CURLOPT_POSTFIELDS => json_encode(['target' => $target, 'op' => 'verify', 'config' => (object) $vals['values']]),
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Authorization: Bearer ' . $key],
+        ]);
+        $body = (string) curl_exec($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $j    = json_decode($body, true);
+        if ($code !== 200 || !is_array($j)) {
+            Flight::jsonError('Could not reach the control plane (HTTP ' . $code . ').', 502); return;
+        }
+        Flight::jsonSuccess($j['data'] ?? [], (string) ($j['message'] ?? ''));
+    }
+
     // ---- guards ------------------------------------------------------------
 
     /** Session + the SELECTED project. No ?inst: core owns which project this is. */
