@@ -448,14 +448,21 @@ class Publish extends Control {
         return ['values' => $out];
     }
 
-    /** Strict host allowlist, mirroring capricorn's valid_host: DNS chars, no traversal. */
+    /**
+     * Strict host allowlist: DNS characters, no traversal, no leading/trailing separator.
+     *
+     * A dot is NOT required. A single-label host is a real thing an SSH target is given —
+     * `localhost`, a short internal name, an alias out of ~/.ssh/config — and the driver
+     * that consumes this value accepts exactly those (SshTargetDriver::connection). This
+     * form used to be stricter than the code it feeds, so a legitimate host came back as
+     * "not a valid hostname" from a validator the driver would have been happy with.
+     */
     private function validHost(string $h): bool {
         $h = strtolower(trim($h));
         if ($h === '' || strlen($h) > 253) return false;
         if (strpos($h, '..') !== false) return false;
         if (!preg_match('/^[a-z0-9.-]+$/', $h)) return false;
-        if (in_array($h[0], ['.', '-'], true) || in_array(substr($h, -1), ['.', '-'], true)) return false;
-        return strpos($h, '.') !== false;
+        return !in_array($h[0], ['.', '-'], true) && !in_array(substr($h, -1), ['.', '-'], true);
     }
 
     /** Instance dir built ONLY from the resolved row's slug/app, never client input. */
