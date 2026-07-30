@@ -443,6 +443,27 @@ class Publish extends Control {
                 if (!ctype_digit($v)) return ['error' => ($f['label'] ?? $name) . ' must be a number.'];
                 $v = (int) $v;
             }
+            // A list of hostnames, one per line (commas tolerated). Validated per entry and
+            // capped by the field's own `max`, so the limit is the driver's rule rather than
+            // a number this form invented. Stored as an array; every bad entry is NAMED —
+            // silently dropping one means a domain you asked for simply never gets served
+            // and nothing ever says why.
+            if (($f['type'] ?? '') === 'hostlist') {
+                $seen = [];
+                foreach (preg_split('/[\s,]+/', $v) ?: [] as $one) {
+                    $one = strtolower(trim($one));
+                    if ($one === '') continue;
+                    if (!$this->validHost($one)) return ['error' => $one . ' is not a valid hostname.'];
+                    $seen[$one] = true;
+                }
+                $max = (int) ($f['max'] ?? 0);
+                if ($max > 0 && count($seen) > $max) {
+                    return ['error' => ($f['label'] ?? $name) . ': at most ' . $max
+                          . ' (you gave ' . count($seen) . ').'];
+                }
+                $v = array_keys($seen);
+                if (!$v) continue;   // nothing left once blanks are dropped
+            }
             $out[$name] = $v;
         }
         return ['values' => $out];

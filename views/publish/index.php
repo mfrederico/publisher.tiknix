@@ -88,7 +88,7 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
          for review AND rsync to a production box — so these are checkboxes, and each
          target renders whatever settings IT declares. Nothing here knows what an rsync
          target needs; the driver says. */
-      $target = function (array $d) use ($h, $chosen, $settings, $bindings) {
+      $target = function (array $d) use ($h, $chosen, $settings, $bindings, $workingUrl) {
           $on   = in_array($d['key'], $chosen, true);
           $vals = (array) ($settings[$d['key']] ?? []);
           $id   = 'tgt-' . preg_replace('/[^a-z0-9]/', '', $d['key']);
@@ -124,10 +124,38 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
           </div>
           <?php if (!empty($d['fields'])): ?>
             <div class="row g-2 mt-1 ms-1 ps-3 border-start pub-fields" data-for="<?= $h($d['key']) ?>" <?= $on ? '' : 'hidden' ?>>
+              <?php if ($d['key'] === 'tiknix-hosted'): ?>
+                <?php /* The two facts you need before typing a domain, next to the box you
+                         type it in: what this project is served at today, and what a CNAME
+                         has to point AT. The help text used to say "this control plane"
+                         without ever naming it, which is only useful if you already know. */
+                  $__cname = class_exists('\app\Publish\TiknixHostedDriver')
+                      ? \app\Publish\TiknixHostedDriver::cnameTarget() : '';
+                  $__host  = parse_url($workingUrl, PHP_URL_HOST) ?: $workingUrl; ?>
+                <div class="col-12">
+                  <div class="alert alert-secondary py-2 px-3 mb-1 small">
+                    <div>
+                      <span class="text-body-secondary">This project is served at</span>
+                      <a href="<?= $h($workingUrl) ?>" target="_blank" rel="noopener"><?= $h($__host) ?></a>
+                    </div>
+                    <?php if ($__cname !== ''): ?>
+                      <div class="mt-1">
+                        <span class="text-body-secondary">Point each domain below at</span>
+                        <code><?= $h($__cname) ?></code>
+                        <span class="text-body-secondary">with a CNAME.</span>
+                      </div>
+                    <?php endif; ?>
+                  </div>
+                </div>
+              <?php endif; ?>
               <?php foreach ($d['fields'] as $f):
                 $fname = (string) $f['name'];
-                $val   = (string) ($vals[$fname] ?? '');
-                $wide  = ($f['type'] ?? '') === 'textarea'; ?>
+                $ftype = (string) ($f['type'] ?? '');
+                // A hostlist is stored as an array; the textarea shows one per line, which
+                // is also how it is typed and how the validator reads it back.
+                $raw   = $vals[$fname] ?? '';
+                $val   = is_array($raw) ? implode("\n", $raw) : (string) $raw;
+                $wide  = $ftype === 'textarea' || $ftype === 'hostlist'; ?>
                 <div class="<?= $wide ? 'col-12' : 'col-sm-4' ?>">
                   <label class="form-label small fw-semibold mb-1"><?= $h($f['label'] ?? $fname) ?><?php if (!empty($f['required'])): ?><span class="text-danger">*</span><?php endif; ?></label>
                   <?php if ($wide): ?>
