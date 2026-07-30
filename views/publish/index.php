@@ -127,11 +127,12 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
               <?php if ($d['key'] === 'tiknix-hosted'): ?>
                 <?php /* The two facts you need before typing a domain, next to the box you
                          type it in: what this project is served at today, and what a CNAME
-                         has to point AT. The help text used to say "this control plane"
-                         without ever naming it, which is only useful if you already know. */
-                  $__cname = class_exists('\app\Publish\TiknixHostedDriver')
-                      ? \app\Publish\TiknixHostedDriver::cnameTarget() : '';
-                  $__host  = parse_url($workingUrl, PHP_URL_HOST) ?: $workingUrl; ?>
+                         has to point AT — which is that same hostname. The help used to say
+                         "this control plane" without naming it, which only helps someone who
+                         already knows; naming the APEX instead would have been worse, since
+                         it is the one target we could never redirect per-project later. */
+                  $__host  = parse_url($workingUrl, PHP_URL_HOST) ?: $workingUrl;
+                  $__cname = $__host; ?>
                 <div class="col-12">
                   <div class="alert alert-secondary py-2 px-3 mb-1 small">
                     <div>
@@ -142,7 +143,7 @@ $dsFile   = $coreRoot . '/views/components/design-system.php';
                       <div class="mt-1">
                         <span class="text-body-secondary">Point each domain below at</span>
                         <code><?= $h($__cname) ?></code>
-                        <span class="text-body-secondary">with a CNAME.</span>
+                        <span class="text-body-secondary">with a CNAME &mdash; that hostname, not the bare tiknix.com.</span>
                       </div>
                     <?php endif; ?>
                   </div>
