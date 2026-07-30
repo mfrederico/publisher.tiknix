@@ -241,6 +241,17 @@ class Publish extends Control {
         $secret = (string) ($cfg['pipeline']['trigger_secret'] ?? '');
         if ($base === '' || $secret === '') { Flight::jsonError('This project has no pipeline trigger configured.', 400); return; }
 
+        // Say WHICH thing is missing. Without this the instance answers 404 "No such
+        // pipeline." and that got relayed verbatim — a message about a pipeline slug, to
+        // someone who pressed a button called Publish and has no reason to know a pipeline
+        // file is what the button needs. The cause is almost always simply that the targets
+        // on this page were never saved.
+        if (!is_file($dir . '/pipelines/' . self::PIPELINE . '.json')) {
+            Flight::jsonError('Nothing to publish yet — choose your targets and press Save first. '
+                . '(This project has no pipelines/' . self::PIPELINE . '.json.)', 409);
+            return;
+        }
+
         $ch = curl_init($base . '/pipeline/trigger/' . rawurlencode(self::PIPELINE));
         curl_setopt_array($ch, [
             CURLOPT_POST           => true,
