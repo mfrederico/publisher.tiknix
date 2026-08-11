@@ -497,10 +497,11 @@ class Publish extends Control {
         return !in_array($h[0], ['.', '-'], true) && !in_array(substr($h, -1), ['.', '-'], true);
     }
 
-    /** Instance dir built ONLY from the resolved row's slug/app, never client input. */
+    /**
+     * Instance dir built ONLY from the resolved row's slug/app, never client input.
+     * The path rule itself is core's — Model_Instance::dirFrom.
+     */
     private function instanceDir(array $inst): string {
-        $parent = dirname(rtrim((string) Flight::get('sidecar.core_root'), '/'));
-        $app    = ($inst['app'] ?? '') !== '' ? $inst['app'] : 'tiknix';
-        return $parent . '/' . $inst['slug'] . '.' . $app;
+        return \Model_Instance::dirFrom((string) $inst['slug'], (string) ($inst['app'] ?? ''));
     }
 }
